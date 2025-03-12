@@ -43,7 +43,7 @@
 ### Option 1: Command-line arguments
 
 ```bash
-python discord_chat_race.py --token "YOUR_DISCORD_TOKEN" --server "SERVER_ID" --channel "CHANNEL_ID"
+python discord_chat_race.py --token "YOUR_DISCORD_TOKEN" --server "SERVER_ID"
 ```
 
 ### Option 2: Environment variables (.env file)
@@ -52,7 +52,6 @@ Create a `.env` file in the project directory:
 ```
 DISCORD_USER_TOKEN=your_token_here
 SERVER_ID=your_server_id_here
-CHANNEL_ID=your_channel_id_here
 ```
 
 Then run:
@@ -65,26 +64,9 @@ python discord_chat_race.py
 ### Extract messages only
 
 ```bash
-python discord_chat_race.py --mode extract --token "YOUR_TOKEN" --channel "CHANNEL_ID"
+python discord_chat_race.py
 ```
 
-### Visualize existing CSV with a specific theme
-
-```bash
-python discord_chat_race.py --mode visualize --csv my_messages.csv --theme neon
-```
-
-### Focus on top users with weekly grouping
-
-```bash
-python discord_chat_race.py --max-users 10 --time-grouping W
-```
-
-### Create high-quality video output
-
-```bash
-python discord_chat_race.py --output discord_movie.mp4 --fps 60 --dpi 300
-```
 
 ## 🎨 Available Themes
 
@@ -128,7 +110,6 @@ python discord_chat_race.py --output discord_movie.mp4 --fps 60 --dpi 300
 
 1. Enable Developer Mode in Discord (User Settings → Advanced → Developer Mode)
 2. Right-click on a server icon and select "Copy ID" to get the Server ID
-3. Right-click on a channel name and select "Copy ID" to get the Channel ID
 
 
 <div align="center">
