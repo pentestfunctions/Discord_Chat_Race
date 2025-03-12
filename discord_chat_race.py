@@ -13,20 +13,147 @@ import matplotlib.patheffects as path_effects
 import random
 import colorsys
 from dotenv import load_dotenv
+import time
 
 # Load environment variables from .env file
 load_dotenv()
 
-# PART 1: DISCORD MESSAGE EXTRACTION
+# PART 1: DISCORD CHANNEL ENUMERATION
 # -----------------------------------
 
-def extract_messages(channel_id, user_token, limit=100, before=None, max_messages=None):
+def enumerate_channels(server_id, user_token):
+    """
+    Enumerate all channels in a Discord server
+    
+    Args:
+        server_id: Discord server ID
+        user_token: Discord user token for authentication
+        
+    Returns:
+        A dictionary mapping channel IDs to their names and types
+    """
+    # Headers for API requests
+    headers = {
+        'Authorization': user_token,
+        'Content-Type': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    }
+    
+    # Get server information to validate token and server ID
+    try:
+        server_response = requests.get(
+            f'https://discord.com/api/v9/guilds/{server_id}',
+            headers=headers
+        )
+        
+        if server_response.status_code == 200:
+            server_data = server_response.json()
+            print(f"Successfully connected to server: {server_data.get('name')}")
+        else:
+            print(f"Error accessing server: {server_response.status_code} - {server_response.text}")
+            return None
+    except Exception as e:
+        print(f"Error connecting to Discord API: {e}")
+        return None
+    
+    # Get all channels in the server
+    try:
+        channel_response = requests.get(
+            f'https://discord.com/api/v9/guilds/{server_id}/channels',
+            headers=headers
+        )
+        
+        if channel_response.status_code == 200:
+            channels = channel_response.json()
+            print(f"Successfully retrieved {len(channels)} channels from server")
+        else:
+            print(f"Error getting channels: {channel_response.status_code} - {channel_response.text}")
+            return None
+    except Exception as e:
+        print(f"Error retrieving channels: {e}")
+        return None
+    
+    # Process the channels into a dict
+    channel_info = {}
+    text_channels = []
+    
+    # First, build a map of category IDs to names
+    categories = {}
+    for channel in channels:
+        if channel['type'] == 4:  # Category
+            categories[channel['id']] = channel['name']
+    
+    # Now process all channels
+    for channel in channels:
+        # Skip categories themselves
+        if channel['type'] == 4:
+            continue
+            
+        # Get channel type
+        channel_type = "Unknown"
+        if channel['type'] == 0:
+            channel_type = "Text"
+            text_channels.append({
+                'id': channel['id'],
+                'name': channel['name'],
+                'parent': categories.get(channel.get('parent_id', ''), 'Uncategorized')
+            })
+        elif channel['type'] == 2:
+            channel_type = "Voice"
+        elif channel['type'] == 5:
+            channel_type = "Announcement"
+            text_channels.append({
+                'id': channel['id'],
+                'name': channel['name'],
+                'parent': categories.get(channel.get('parent_id', ''), 'Uncategorized')
+            })
+        elif channel['type'] == 13:
+            channel_type = "Stage"
+        elif channel['type'] == 15:
+            channel_type = "Forum"
+        elif channel['type'] == 16:
+            channel_type = "MediaChannel"
+        
+        # Add to our mapping
+        channel_info[channel['id']] = {
+            'name': channel['name'],
+            'type': channel_type,
+            'category': categories.get(channel.get('parent_id', ''), 'Uncategorized')
+        }
+    
+    # Print text channels for user selection
+    print("\nAvailable text channels:")
+    print("------------------------")
+    
+    # Group by category for better organization
+    by_category = {}
+    for channel in text_channels:
+        if channel['parent'] not in by_category:
+            by_category[channel['parent']] = []
+        by_category[channel['parent']].append(channel)
+    
+    # Sort categories alphabetically
+    sorted_categories = sorted(by_category.keys())
+    
+    # Print channels grouped by category
+    for category in sorted_categories:
+        print(f"\n{category.upper()}:")
+        for i, channel in enumerate(sorted(by_category[category], key=lambda x: x['name'])):
+            print(f"  - {channel['name']} (ID: {channel['id']})")
+    
+    return channel_info
+
+# PART 2: DISCORD MESSAGE EXTRACTION
+# -----------------------------------
+
+def extract_messages(channel_id, user_token, channel_name="Unknown", limit=100, before=None, max_messages=None):
     """
     Extract messages from a channel using Discord API directly.
     
     Args:
         channel_id: The Discord channel ID to extract messages from
         user_token: Discord user token for authentication
+        channel_name: The name of the channel (for display only)
         limit: Number of messages to request per API call (max 100)
         before: Message ID to fetch messages before
         max_messages: Maximum number of messages to extract (None for all)
@@ -44,7 +171,7 @@ def extract_messages(channel_id, user_token, limit=100, before=None, max_message
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     }
     
-    print(f"Starting to extract messages from channel {channel_id}...")
+    print(f"Starting to extract messages from channel: (ID: {channel_id})...")
     
     # Continue fetching messages until we get all or hit an error
     total_messages = 0
@@ -89,7 +216,9 @@ def extract_messages(channel_id, user_token, limit=100, before=None, max_message
                 messages.append({
                     'author': author,
                     'timestamp': timestamp,
-                    'message_id': msg['id']
+                    'message_id': msg['id'],
+                    'channel_id': channel_id,
+                    'channel_name': channel_name
                 })
             
             # Update the 'before' parameter to get the next batch
@@ -97,23 +226,28 @@ def extract_messages(channel_id, user_token, limit=100, before=None, max_message
             
             # Update total and print progress
             total_messages += len(batch)
-            print(f"Extracted {total_messages} messages so far...")
+            print(f"  Extracted {total_messages} messages so far...")
             
             # If we got fewer messages than we asked for, we're done
             if len(batch) < batch_limit:
                 has_more = False
+        elif response.status_code == 429:  # Rate limited
+            # Parse rate limit information
+            retry_after = response.json().get('retry_after', 5)
+            print(f"  Rate limited. Waiting for {retry_after} seconds...")
+            time.sleep(retry_after + 0.5)  # Add a small buffer
         else:
-            print(f"Error: {response.status_code} - {response.text}")
+            print(f"  Error: {response.status_code} - {response.text}")
             has_more = False
     
-    print(f"Finished extracting {len(messages)} messages.")
+    print(f"  Finished extracting {len(messages)} messages")
     return messages
 
 def save_to_csv(messages, filename="discord_messages.csv"):
     """Save extracted messages to a CSV file"""
     with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
-        # Define CSV columns - only username and timestamp
-        fieldnames = ['message_id', 'timestamp', 'author']
+        # Define CSV columns
+        fieldnames = ['message_id', 'timestamp', 'author', 'channel_id', 'channel_name']
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         
         # Write header and data
@@ -123,23 +257,98 @@ def save_to_csv(messages, filename="discord_messages.csv"):
     
     print(f"Messages saved to {filename}")
 
+def extract_server_messages(server_id, user_token, channel_ids=None, max_messages=None, output_dir="output"):
+    """Extract messages from multiple channels in a server"""
+    
+    # Ensure output directory exists
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # If no specific channel IDs provided, get all text channels
+    all_channels = None
+    if channel_ids is None:
+        all_channels = enumerate_channels(server_id, user_token)
+        if not all_channels:
+            print("Failed to retrieve channels from server.")
+            return None
+        
+        # Filter for text channels only
+        text_channels = {
+            id: info for id, info in all_channels.items() 
+            if info['type'] in ['Text', 'Announcement']
+        }
+        
+        channel_ids = list(text_channels.keys())
+    
+    # Check if we have any channels to process
+    if not channel_ids:
+        print("No text channels found in server.")
+        return None
+    
+    print(f"\nExtracting messages from {len(channel_ids)} channels...")
+    
+    # Extract messages from each channel
+    all_messages = []
+    combined_csv = os.path.join(output_dir, f"discord_server_{server_id}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+    
+    for i, channel_id in enumerate(channel_ids):
+        # Get channel name if we have it
+        channel_name = "Unknown"
+        if all_channels and channel_id in all_channels:
+            channel_name = all_channels[channel_id]['name']
+        
+        print(f"\nProcessing channel {i+1}/{len(channel_ids)}")
+        
+        # Extract messages for this channel
+        channel_messages = extract_messages(
+            channel_id=channel_id,
+            user_token=user_token,
+            channel_name=channel_name,
+            max_messages=max_messages
+        )
+        
+        # Save channel-specific CSV
+        if channel_messages:
+            # Add to combined list
+            all_messages.extend(channel_messages)
+            
+            # Save individual channel data
+            channel_csv = os.path.join(output_dir, f"discord_channel_{channel_id}.csv")
+            save_to_csv(channel_messages, channel_csv)
+    
+    # Save combined CSV with all messages
+    if all_messages:
+        save_to_csv(all_messages, combined_csv)
+        print(f"\nComplete! Extracted {len(all_messages)} total messages across {len(channel_ids)} channels.")
+        return combined_csv
+    
+    print("No messages were extracted.")
+    return None
 
-# PART 2: DATA VISUALIZATION
+
+# PART 3: DATA VISUALIZATION
 # --------------------------
 
-def prepare_discord_data(csv_file, time_grouping='D'):
+def prepare_discord_data(csv_file, time_grouping='D', channel_filter=None):
     """
     Prepare Discord message data for visualization.
     
     Args:
         csv_file: Path to CSV file with Discord messages
         time_grouping: How to group timestamps ('D' for daily, 'W' for weekly, 'M' for monthly)
+        channel_filter: Only include messages from this channel ID (None for all channels)
     
     Returns:
         DataFrame ready for animation
     """
     # Read the CSV file
     df = pd.read_csv(csv_file)
+    
+    # Apply channel filter if specified
+    if channel_filter:
+        if 'channel_id' in df.columns:
+            df = df[df['channel_id'] == channel_filter]
+        else:
+            print("Warning: CSV doesn't contain channel_id column, cannot filter by channel.")
     
     # Convert timestamp to datetime
     df['timestamp'] = pd.to_datetime(df['timestamp'])
@@ -238,7 +447,8 @@ def generate_theme_colors(n, theme_name):
     return colors
 
 def create_animation(csv_file, time_grouping='D', theme_name='discord', max_users=20, 
-                     output_file=None, fps=30, dpi=200):
+                     output_file=None, fps=30, dpi=200, channel_filter=None, channel_name=None,
+                     server_name=None, server_id=None):
     """
     Create a bar chart race animation from Discord message data.
     
@@ -250,12 +460,21 @@ def create_animation(csv_file, time_grouping='D', theme_name='discord', max_user
         output_file: Path to save the animation (None to just display)
         fps: Frames per second for the saved animation
         dpi: DPI for the saved animation
+        channel_filter: Only include messages from this channel ID (None for all channels)
+        channel_name: Name of the channel (for display purposes)
+        server_name: Name of the server (for display purposes)
+        server_id: ID of the server (for display purposes)
     """
     # Get theme
     theme = THEMES[theme_name]
     
     # Load the Discord message data
-    full_df = prepare_discord_data(csv_file, time_grouping)
+    full_df = prepare_discord_data(csv_file, time_grouping, channel_filter)
+    
+    # Make sure we have data
+    if full_df.empty:
+        print("No data to visualize. The CSV may be empty or filtering removed all entries.")
+        return None
     
     # Get the final message counts to identify top users
     final_counts = full_df.iloc[-1].sort_values(ascending=False)
@@ -265,6 +484,11 @@ def create_animation(csv_file, time_grouping='D', theme_name='discord', max_user
     
     # Filter dataframe to only include top users
     raw_df = full_df[top_users]
+    
+    # Ensure we have at least some data
+    if raw_df.empty:
+        print("No data to visualize after filtering for top users.")
+        return None
     
     # Interpolate to create more data points for smoother animation
     steps_per_period = 5
@@ -368,19 +592,24 @@ def create_animation(csv_file, time_grouping='D', theme_name='discord', max_user
             ax.text(0.2, i, display_name, ha='left', va='center', fontsize=10, color='white', 
                     fontweight='bold', path_effects=text_effect)
         
-        # Add date as chart title with cleaner formatting
-        title = f'Discord Messages Over Time (as of {current_date.strftime("%Y-%m-%d")})'
+        # Add title with channel info if specified
+        if channel_name:
+            title = f'Discord Messages in current channel (as of {current_date.strftime("%Y-%m-%d")})'
+        else:
+            title = f'Discord Messages Over Time (as of {current_date.strftime("%Y-%m-%d")})'
         plt.title(title, fontsize=16, pad=20, fontweight='bold', loc='center', color=theme['title_color'])
         
-        # Add subtitle if desired
-        if time_grouping == 'D':
-            grouping_text = "Daily Grouping"
-        elif time_grouping == 'W':
-            grouping_text = "Weekly Grouping"
-        else:
-            grouping_text = "Monthly Grouping"
+        # Add subtitle with server information instead of time grouping
+        server_display = ""
+        if server_name and server_id:
+            server_display = f"Server: {server_name} (ID: {server_id})"
+        elif server_name:
+            server_display = f"Server: {server_name}"
+        elif server_id:
+            server_display = f"Server ID: {server_id}"
         
-        plt.suptitle(grouping_text, fontsize=10, color=theme['text_color'], alpha=0.7, y=0.91)
+        if server_display:
+            plt.suptitle(server_display, fontsize=10, color=theme['text_color'], alpha=0.7, y=0.91)
         
         # Customize x-axis
         ax.xaxis.set_major_formatter(ticker.StrMethodFormatter('{x:,.0f}'))
@@ -441,28 +670,27 @@ def create_animation(csv_file, time_grouping='D', theme_name='discord', max_user
         print(f"Animation saved to {output_file}")
     
     # Display the animation (this will block until the window is closed)
-    plt.show()
-    
+    #plt.show()
+    print(f"Video file is ready as long as ffmpeg worked correctly, check the output folder for the mp4")
     return animator
 
 
-# PART 3: MAIN FUNCTION
+# PART 4: MAIN FUNCTION
 # ---------------------
 
 def main():
     # Set up argument parser
     parser = argparse.ArgumentParser(description='Discord Message Analyzer and Visualizer')
     
-    # Main operation mode
+    # Main operation mode - simplify to focus on server-wide analysis
     parser.add_argument('--mode', choices=['extract', 'visualize', 'both'], default='both',
-                      help='Operation mode: extract messages, visualize existing data, or both')
+                      help='Operation mode: extract messages, visualize existing data, or both (default: both)')
     
     # Discord API parameters
     parser.add_argument('--token', help='Discord user token (or set DISCORD_USER_TOKEN env var)')
     parser.add_argument('--server', help='Discord server ID (or set SERVER_ID env var)')
-    parser.add_argument('--channel', help='Discord channel ID (or set CHANNEL_ID env var)')
     parser.add_argument('--max-messages', type=int, default=None, 
-                      help='Maximum number of messages to extract (default: all)')
+                      help='Maximum number of messages to extract per channel (default: all)')
     
     # Visualization parameters
     parser.add_argument('--csv', help='Path to CSV file (default: auto-generated)',
@@ -473,81 +701,132 @@ def main():
                       help=f'Theme for visualization (default: discord)')
     parser.add_argument('--max-users', type=int, default=20,
                       help='Maximum number of users to show in visualization (default: 20)')
-    parser.add_argument('--output', help='Output video file path (default: no save)',
+    parser.add_argument('--output', help='Output video file path (default: auto-generated)',
                       default=None)
     parser.add_argument('--fps', type=int, default=30,
                       help='Frames per second for saved video (default: 30)')
     parser.add_argument('--dpi', type=int, default=200,
                       help='DPI for saved video (default: 200)')
+    parser.add_argument('--output-dir', default='output',
+                      help='Directory to save output files (default: output)')
     
     # Parse arguments
     args = parser.parse_args()
     
-    # Get token and channel from arguments or environment variables
+    # Get token and IDs from arguments or environment variables
     user_token = args.token or os.getenv('DISCORD_USER_TOKEN')
     server_id = args.server or os.getenv('SERVER_ID')
-    channel_id = args.channel or os.getenv('CHANNEL_ID')
+    
+    # Create output directory if it doesn't exist
+    os.makedirs(args.output_dir, exist_ok=True)
     
     # Generate or use provided CSV filename
     csv_file = args.csv
-    if not csv_file and (args.mode == 'extract' or args.mode == 'both'):
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        csv_file = f"discord_messages_{server_id}_{channel_id}_{timestamp}.csv"
-        # Remove characters that are not allowed in filenames
-        csv_file = "".join(c for c in csv_file if c.isalnum() or c in "._- ")
     
     # Default output filename if not provided
     output_file = args.output
     if not output_file and (args.mode == 'visualize' or args.mode == 'both'):
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_file = f"discord_visualization_{timestamp}.mp4"
+        output_file = os.path.join(args.output_dir, f"discord_server_{server_id}_visualization_{timestamp}.mp4")
     
     try:
-        # Extract messages
-        if args.mode == 'extract' or args.mode == 'both':
-            if not user_token or not channel_id:
-                raise ValueError(f"""
+        # First, ensure we have the required parameters
+        if not user_token or not server_id:
+            raise ValueError(f"""
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║                          MISSING REQUIRED PARAMETERS                         ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 
-Discord token, Server ID and Channel ID are required for extraction.
+Discord token and Server ID are required for server-wide analysis.
 
 You can provide these values in one of two ways:
 
 1. Command-line arguments:
-   python discord_chat_race.py --token MZ..... --server 123456 --channel 123456
+   python discord_chat_race.py --token MZ..... --server 123456
 
 2. Environment variables in a .env file:
    Create a file named '.env' in the same directory with these contents (No quotes):
    
    DISCORD_USER_TOKEN=your_token_here
    SERVER_ID=your_server_id_here
-   CHANNEL_ID=your_channel_id_here
 
 How to find these values:
     • Token: Log into Discord web, open DevTools (F12), check Local Storage
     • Server ID: Right-click on server icon → Copy ID (Developer Mode required)
-    • Channel ID: Right-click on channel name → Copy ID (Developer Mode required)
 
 To enable Developer Mode: User Settings → Advanced → Developer Mode
 """)
+        
+        # Get server name automatically for display
+        server_name = None
+        try:
+            headers = {
+                'Authorization': user_token,
+                'Content-Type': 'application/json',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
             
-            print(f"Extracting messages from Discord channel {channel_id}...")
-            messages = extract_messages(
-                channel_id=channel_id,
-                user_token=user_token,
-                max_messages=args.max_messages
+            server_response = requests.get(
+                f'https://discord.com/api/v9/guilds/{server_id}',
+                headers=headers
             )
             
-            save_to_csv(messages, csv_file)
+            if server_response.status_code == 200:
+                server_data = server_response.json()
+                server_name = server_data.get('name')
+                print(f"Server name: {server_name}")
+            else:
+                print(f"Could not fetch server name: HTTP {server_response.status_code}")
+        except Exception as e:
+            print(f"Error fetching server name: {e}")
+        
+        # Extract mode: Get messages from all server channels
+        if args.mode == 'extract' or args.mode == 'both':
+            print(f"Enumerating all channels in server {server_id}...")
+            
+            # Get all channels in the server
+            all_channels = enumerate_channels(server_id, user_token)
+            if not all_channels:
+                raise ValueError("Failed to retrieve channels from server.")
+            
+            # Filter for text channels only
+            text_channels = {
+                id: info for id, info in all_channels.items() 
+                if info['type'] in ['Text', 'Announcement']
+            }
+            
+            channel_ids = list(text_channels.keys())
+            
+            if not channel_ids:
+                raise ValueError("No text channels found in server.")
+            
+            print(f"\nFound {len(channel_ids)} text channels in server.")
+            
+            # If CSV file not specified, create one with timestamp and server ID
+            if not csv_file:
+                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                csv_file = os.path.join(args.output_dir, f"discord_server_{server_id}_{timestamp}.csv")
+            
+            # Extract all messages from all channels
+            print(f"\nExtracting messages from all {len(channel_ids)} channels...")
+            csv_file = extract_server_messages(
+                server_id=server_id,
+                user_token=user_token,
+                channel_ids=channel_ids,
+                max_messages=args.max_messages,
+                output_dir=args.output_dir
+            )
+            
+            print(f"\nAll messages extracted and saved to {csv_file}")
         
         # Visualize data
         if args.mode == 'visualize' or args.mode == 'both':
             if not csv_file:
-                raise ValueError("CSV file path required for visualization")
+                raise ValueError("CSV file path required for visualization. Please run with '--mode extract' first or specify a CSV file with '--csv'.")
             
-            print(f"Creating visualization from {csv_file}...")
+            print(f"\nCreating server-wide visualization from {csv_file}...")
+            
+            # No channel filter - we want the entire server
             create_animation(
                 csv_file=csv_file,
                 time_grouping=args.time_grouping,
@@ -555,8 +834,13 @@ To enable Developer Mode: User Settings → Advanced → Developer Mode
                 max_users=args.max_users,
                 output_file=output_file,
                 fps=args.fps,
-                dpi=args.dpi
+                dpi=args.dpi,
+                server_name=server_name,
+                server_id=server_id,
+                channel_filter=None  # No channel filter - use all data
             )
+            
+            print(f"\nVisualization complete and saved to {output_file}")
             
     except Exception as e:
         print(f"An error occurred: {e}")
